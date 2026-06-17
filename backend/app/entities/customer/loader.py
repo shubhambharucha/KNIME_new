@@ -98,7 +98,7 @@ def load_batch(records: list[dict], token_manager: TokenManager) -> list[dict]:
         }
 
         # --- 1. Extract fields present in PAYLOAD_FIELDS, skip missing/empty ---
-        record = {}
+        record = dict(config.PAYLOAD_FIELDS)  
         for src, dest in config.PAYLOAD_FIELDS.items():
             value = raw.get(src)
             if value is not None and str(value).strip() != "":
