@@ -87,10 +87,9 @@ def _coerce_types(record: dict) -> dict:
 
 def _set_business_relation_code(record: dict) -> dict:
     """
-    NEW: Since we always create a brand-new Business Relation
+    Since we always create a brand-new Business Relation
     (isCreateBusinessRelationRequired=True), there is no existing
-    BR code to look up. Use customerCode as the BR code, mirroring
-    how QAD behaves when a BR is created on-the-fly via the UI.
+    BR code to look up. Use customerCode as the BR code.
     """
     if not record.get("businessRelationCode") and record.get("customerCode"):
         record["businessRelationCode"] = record["customerCode"]
@@ -109,6 +108,10 @@ def _apply_defaults(record: dict) -> dict:
 
 
 def _validate_mandatory_fields(record: dict) -> tuple[bool, str]:
+    """
+    Check that all mandatory fields are present and non-empty.
+    Returns (is_valid, error_message)
+    """
     missing = []
     for col in config.MANDATORY_COLUMNS:
         value = record.get(col)
@@ -127,7 +130,6 @@ def _build_customer_payload(record: dict) -> dict:
     if not record.get("addressName") and record.get("businessRelationName"):
         record["addressName"] = record["businessRelationName"]
 
-    # Fall back to customerCode if businessRelationName also isn't set
     if not record.get("addressSearchName"):
         record["addressSearchName"] = record.get("businessRelationName") or record.get("customerCode", "")
 
@@ -138,6 +140,29 @@ def _build_customer_payload(record: dict) -> dict:
         customer_v2[key] = value
 
     return {"customerV2s": [customer_v2]}
+
+
+def _extract_status_fields(resp_json: dict) -> dict:
+    """
+    NEW: Pull out the fields that tell us whether the record QAD created
+    is actually "live" (active, no pending change request, no blocked
+    actions) versus sitting in a pending/draft state that won't show up
+    on other screens or downstream/aux systems yet.
+    """
+    try:
+        customer_obj = resp_json.get("customerV2s", [{}])[0]
+    except (KeyError, IndexError, TypeError):
+        customer_obj = {}
+
+    return {
+        "uri": customer_obj.get("uri"),
+        "changeStatus": customer_obj.get("changeStatus"),
+        "isActive": customer_obj.get("isActive"),
+        "isBusinessRelationActive": customer_obj.get("isBusinessRelationActive"),
+        "disallowedActions": customer_obj.get("disallowedActions"),
+        "disallowedActionsMessage": customer_obj.get("disallowedActionsMessage"),
+    }
+
 
 def load_batch(records: list[dict], token_manager: TokenManager) -> list[dict]:
     """
@@ -154,13 +179,8 @@ def load_batch(records: list[dict], token_manager: TokenManager) -> list[dict]:
                 "row": 0,
                 "ok": True,
                 "customerCode": "EXP004",
-                "error": None
-            },
-            {
-                "row": 1,
-                "ok": False,
-                "customerCode": "EXP009",
-                "error": "Missing mandatory: invoiceControlGLProfileCode"
+                "error": None,
+                "status": { "uri": ..., "changeStatus": ..., "isActive": ..., ... }
             },
             ...
         ]
@@ -169,27 +189,21 @@ def load_batch(records: list[dict], token_manager: TokenManager) -> list[dict]:
     token = token_manager.get()
 
     for row_idx, record in enumerate(records):
-        # Make a copy to avoid mutating original
         record = dict(record)
-        
+
         result = {
             "row": row_idx,
             "ok": False,
             "customerCode": record.get("customerCode", ""),
             "error": None,
+            "status": None,  # NEW: populated on success
         }
 
         try:
-            # Step 1: Type coercions (IDs → strings)
             record = _coerce_types(record)
-
-            # Step 1b: Derive businessRelationCode from customerCode (new BR)
             record = _set_business_relation_code(record)
-
-            # Step 2: Apply defaults
             record = _apply_defaults(record)
 
-            # Step 3: Validate mandatory fields
             is_valid, error_msg = _validate_mandatory_fields(record)
             if not is_valid:
                 result["error"] = error_msg
@@ -197,7 +211,6 @@ def load_batch(records: list[dict], token_manager: TokenManager) -> list[dict]:
                 logger.warning(f"Row {row_idx}: {error_msg}")
                 continue
 
-            # Step 4: Build payload
             payload = _build_customer_payload(record)
 
         except Exception as e:
@@ -206,7 +219,6 @@ def load_batch(records: list[dict], token_manager: TokenManager) -> list[dict]:
             logger.error(f"Row {row_idx}: {result['error']}")
             continue
 
-        # Step 5: Extract query params
         customer_code = record.get("customerCode", "")
         shared_set_code = record.get("sharedSetCode", "")
 
@@ -216,7 +228,6 @@ def load_batch(records: list[dict], token_manager: TokenManager) -> list[dict]:
             logger.warning(f"Row {row_idx}: {result['error']}")
             continue
 
-        # Step 6: Prepare request
         query_params = {
             "sharedSetCode": shared_set_code,
             "customerCode": customer_code,
@@ -227,7 +238,6 @@ def load_batch(records: list[dict], token_manager: TokenManager) -> list[dict]:
             "Authorization": f"Bearer {token}",
         }
 
-        # Step 7: POST with retry on 401 (token refresh)
         retry = True
         while retry:
             try:
@@ -242,19 +252,34 @@ def load_batch(records: list[dict], token_manager: TokenManager) -> list[dict]:
                 if resp.status_code in (200, 201):
                     result["ok"] = True
                     result["error"] = None
-                    logger.info(f"Row {row_idx}: ✅ {customer_code}")
+
+                    # NEW: capture + log the response body status fields
+                    try:
+                        resp_json = resp.json()
+                        status_fields = _extract_status_fields(resp_json)
+                        result["status"] = status_fields
+                        logger.info(
+                            f"Row {row_idx}: ✅ {customer_code} | "
+                            f"changeStatus={status_fields['changeStatus']} "
+                            f"isActive={status_fields['isActive']} "
+                            f"isBusinessRelationActive={status_fields['isBusinessRelationActive']} "
+                            f"disallowedActions={status_fields['disallowedActions']!r}"
+                        )
+                    except Exception as parse_err:
+                        logger.warning(
+                            f"Row {row_idx}: ✅ {customer_code} but could not parse "
+                            f"response body for status fields: {parse_err}"
+                        )
+
                     retry = False
 
                 elif resp.status_code == 401:
-                    # Token expired, refresh and retry
                     logger.warning(f"Row {row_idx}: Token expired, refreshing...")
                     token = token_manager.refresh()
                     headers["Authorization"] = f"Bearer {token}"
-                    # Loop will retry with new token
 
                 else:
-                    # Other error (4xx, 5xx)
-                    error_text = resp.text[:500]  # Truncate long error messages
+                    error_text = resp.text[:500]
                     result["error"] = f"HTTP {resp.status_code}: {error_text}"
                     logger.error(f"Row {row_idx}: {result['error']}")
                     retry = False
