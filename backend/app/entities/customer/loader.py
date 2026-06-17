@@ -70,21 +70,30 @@ def _coerce_types(record: dict) -> dict:
         "prePaymentControlGLProfileCode",
         "salesAccountGLProfileCode",
     ]
-    
+
     for field in gl_profile_fields:
         value = record.get(field)
         if value is not None:
             if isinstance(value, int):
-                # Convert integer ID to string
                 record[field] = str(value)
             elif isinstance(value, str) and value.strip():
-                # Keep non-empty strings as-is
                 pass
             else:
-                # Remove empty/None values; will be filled by defaults
                 if field in record:
                     del record[field]
-    
+
+    return record
+
+
+def _set_business_relation_code(record: dict) -> dict:
+    """
+    NEW: Since we always create a brand-new Business Relation
+    (isCreateBusinessRelationRequired=True), there is no existing
+    BR code to look up. Use customerCode as the BR code, mirroring
+    how QAD behaves when a BR is created on-the-fly via the UI.
+    """
+    if not record.get("businessRelationCode") and record.get("customerCode"):
+        record["businessRelationCode"] = record["customerCode"]
     return record
 
 
@@ -93,18 +102,13 @@ def _apply_defaults(record: dict) -> dict:
     Apply DEFAULTS to record where fields are empty/missing.
     """
     for col, default_value in config.DEFAULTS.items():
-        # Only apply if field is missing or empty
         if col not in record or record[col] is None or (isinstance(record[col], str) and not record[col].strip()):
             record[col] = default_value
-    
+
     return record
 
 
 def _validate_mandatory_fields(record: dict) -> tuple[bool, str]:
-    """
-    Check that all mandatory fields are present and non-empty.
-    Returns (is_valid, error_message)
-    """
     missing = []
     for col in config.MANDATORY_COLUMNS:
         value = record.get(col)
@@ -119,18 +123,14 @@ def _validate_mandatory_fields(record: dict) -> tuple[bool, str]:
 def _build_customer_payload(record: dict) -> dict:
     """
     Build the customerV2s payload (wrapped in { "customerV2s": [...] }).
-    
-    Populates:
-    - addressName and addressSearchName from businessRelationName if not set
-    - Removes None/empty values to keep payload clean
     """
-    # Populate address fields from businessRelationName
     if not record.get("addressName") and record.get("businessRelationName"):
         record["addressName"] = record["businessRelationName"]
-    if not record.get("addressSearchName") and record.get("businessRelationName"):
-        record["addressSearchName"] = record["businessRelationName"]
 
-    # Build clean payload (exclude None and empty strings)
+    # Fall back to customerCode if businessRelationName also isn't set
+    if not record.get("addressSearchName"):
+        record["addressSearchName"] = record.get("businessRelationName") or record.get("customerCode", "")
+
     customer_v2 = {}
     for key, value in record.items():
         if value is None or (isinstance(value, str) and not value.strip()):
@@ -138,7 +138,6 @@ def _build_customer_payload(record: dict) -> dict:
         customer_v2[key] = value
 
     return {"customerV2s": [customer_v2]}
-
 
 def load_batch(records: list[dict], token_manager: TokenManager) -> list[dict]:
     """
@@ -183,6 +182,9 @@ def load_batch(records: list[dict], token_manager: TokenManager) -> list[dict]:
         try:
             # Step 1: Type coercions (IDs → strings)
             record = _coerce_types(record)
+
+            # Step 1b: Derive businessRelationCode from customerCode (new BR)
+            record = _set_business_relation_code(record)
 
             # Step 2: Apply defaults
             record = _apply_defaults(record)
