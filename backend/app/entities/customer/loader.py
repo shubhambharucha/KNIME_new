@@ -3,20 +3,18 @@ app/entities/customer/loader.py
 --------------------------------
 Load Customer records into QAD customerV2s API.
 
-Handles:
-- Integer GL profile IDs → string conversions
-- Empty mandatory fields → apply defaults
-- Address population from businessRelationName
-- Per-row success/error tracking
+STRICT MODE: only customerCode and currencyCode come from the source
+record. Everything else is hardcoded via config.DEFAULTS.
 
 Flow:
-  1. For each flattened record from the batch
-  2. Apply type coercions (IDs → strings)
-  3. Validate mandatory fields
-  4. Build customerV2s payload
-  5. POST to QAD with query params
-  6. Capture success (200) or error message
-  7. Return per-row results
+  1. For each record (only customerCode + currencyCode survive aliasing)
+  2. Derive businessRelationCode from customerCode
+  3. Apply hardcoded defaults
+  4. Validate mandatory fields
+  5. Build customerV2s payload
+  6. POST to QAD with query params
+  7. Capture success (200) or error message
+  8. Return per-row results
 """
 
 import logging
@@ -28,7 +26,6 @@ from . import config
 
 logger = logging.getLogger(__name__)
 
-# QAD customerV2s API base endpoint
 QAD_CUSTOMER_ENDPOINT = f"{CONFIG['qad']['base_url']}/api/erp/customerV2s"
 QAD_VIEW_URI = "urn:be:com.qad.base.customer.ICustomerV2"
 
@@ -59,51 +56,26 @@ class TokenManager:
         return token
 
 
-def _coerce_types(record: dict) -> dict:
-    """
-    Convert integer GL profile IDs to strings.
-    Ensure all GL codes are strings for API compatibility.
-    """
-    gl_profile_fields = [
-        "invoiceControlGLProfileCode",
-        "creditNoteControlGLProfileCode",
-        "prePaymentControlGLProfileCode",
-        "salesAccountGLProfileCode",
-    ]
-
-    for field in gl_profile_fields:
-        value = record.get(field)
-        if value is not None:
-            if isinstance(value, int):
-                record[field] = str(value)
-            elif isinstance(value, str) and value.strip():
-                pass
-            else:
-                if field in record:
-                    del record[field]
-
-    return record
-
-
 def _set_business_relation_code(record: dict) -> dict:
     """
-    Since we always create a brand-new Business Relation
-    (isCreateBusinessRelationRequired=True), there is no existing
+    Every record creates a brand-new Business Relation
+    (isCreateBusinessRelationRequired=True), so there's no existing
     BR code to look up. Use customerCode as the BR code.
     """
-    if not record.get("businessRelationCode") and record.get("customerCode"):
+    if record.get("customerCode"):
         record["businessRelationCode"] = record["customerCode"]
     return record
 
 
 def _apply_defaults(record: dict) -> dict:
     """
-    Apply DEFAULTS to record where fields are empty/missing.
+    Apply config.DEFAULTS to record. Since only customerCode and
+    currencyCode come in, this effectively populates the entire rest
+    of the payload.
     """
     for col, default_value in config.DEFAULTS.items():
         if col not in record or record[col] is None or (isinstance(record[col], str) and not record[col].strip()):
             record[col] = default_value
-
     return record
 
 
@@ -127,12 +99,6 @@ def _build_customer_payload(record: dict) -> dict:
     """
     Build the customerV2s payload (wrapped in { "customerV2s": [...] }).
     """
-    if not record.get("addressName") and record.get("businessRelationName"):
-        record["addressName"] = record["businessRelationName"]
-
-    if not record.get("addressSearchName"):
-        record["addressSearchName"] = record.get("businessRelationName") or record.get("customerCode", "")
-
     customer_v2 = {}
     for key, value in record.items():
         if value is None or (isinstance(value, str) and not value.strip()):
@@ -144,10 +110,9 @@ def _build_customer_payload(record: dict) -> dict:
 
 def _extract_status_fields(resp_json: dict) -> dict:
     """
-    NEW: Pull out the fields that tell us whether the record QAD created
-    is actually "live" (active, no pending change request, no blocked
-    actions) versus sitting in a pending/draft state that won't show up
-    on other screens or downstream/aux systems yet.
+    Pull out fields that tell us whether the created record is "live"
+    (active, no pending change request, no blocked actions) vs sitting
+    in a pending/draft state.
     """
     try:
         customer_obj = resp_json.get("customerV2s", [{}])[0]
@@ -170,6 +135,7 @@ def load_batch(records: list[dict], token_manager: TokenManager) -> list[dict]:
 
     Args:
         records: List of flattened, aliased customer records
+                 (only customerCode + currencyCode populated from source)
         token_manager: TokenManager instance for OAuth
 
     Returns:
@@ -189,6 +155,8 @@ def load_batch(records: list[dict], token_manager: TokenManager) -> list[dict]:
     token = token_manager.get()
 
     for row_idx, record in enumerate(records):
+        # Only customerCode and currencyCode should exist on `record`
+        # at this point (everything else stripped by COLUMN_ALIASES).
         record = dict(record)
 
         result = {
@@ -196,11 +164,10 @@ def load_batch(records: list[dict], token_manager: TokenManager) -> list[dict]:
             "ok": False,
             "customerCode": record.get("customerCode", ""),
             "error": None,
-            "status": None,  # NEW: populated on success
+            "status": None,
         }
 
         try:
-            record = _coerce_types(record)
             record = _set_business_relation_code(record)
             record = _apply_defaults(record)
 
@@ -253,7 +220,6 @@ def load_batch(records: list[dict], token_manager: TokenManager) -> list[dict]:
                     result["ok"] = True
                     result["error"] = None
 
-                    # NEW: capture + log the response body status fields
                     try:
                         resp_json = resp.json()
                         status_fields = _extract_status_fields(resp_json)
