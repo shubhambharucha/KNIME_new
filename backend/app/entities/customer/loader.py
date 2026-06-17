@@ -1,14 +1,5 @@
 """
 app/entities/customer/loader.py
---------------------------------
-Load Customer records into QAD customerV2s API.
-
-Pipeline per record:
-  1. Extract known fields from incoming JSON (PAYLOAD_FIELDS)
-  2. Inject hardcoded values (HARDCODED)
-  3. Validate mandatory fields
-  4. POST { "customerV2s": [record] } to QAD
-  5. Return per-row result including the exact payload sent
 """
 
 import logging
@@ -19,17 +10,11 @@ from . import config
 
 logger = logging.getLogger(__name__)
 
-QAD_ENDPOINT  = f"{CONFIG['qad']['base_url']}/api/erp/customerV2s"
-QAD_VIEW_URI  = "urn:be:com.qad.base.customer.ICustomerV2"
+QAD_ENDPOINT = f"{CONFIG['qad']['base_url']}/api/erp/customerV2s"
+QAD_VIEW_URI = "urn:be:com.qad.base.customer.ICustomerV2"
 
-
-# ---------------------------------------------------------------------------
-# Token management
-# ---------------------------------------------------------------------------
 
 class TokenManager:
-    """Fetches and caches an OAuth bearer token. Auto-refreshes on 401."""
-
     def __init__(self):
         self._token: str | None = None
 
@@ -56,35 +41,9 @@ class TokenManager:
         return token
 
 
-# ---------------------------------------------------------------------------
-# Batch loader
-# ---------------------------------------------------------------------------
-
 def load_batch(records: list[dict], token_manager: TokenManager) -> list[dict]:
-    """
-    Process and POST each record to QAD.
-
-    Args:
-        records:       Raw incoming records from the API.
-        token_manager: OAuth token manager.
-
-    Returns:
-        List of per-row result dicts:
-        {
-            "row":          int,
-            "customerCode": str,
-            "ok":           bool,
-            "error":        str | None,
-            "payload_sent": dict,       # exact body POSTed to QAD
-            "status": {                 # populated on success
-                "uri", "changeStatus", "isActive",
-                "isBusinessRelationActive",
-                "disallowedActions", "disallowedActionsMessage"
-            } | None
-        }
-    """
     results = []
-    token   = token_manager.get()
+    token = token_manager.get()
 
     for row_idx, raw in enumerate(records):
 
@@ -97,15 +56,14 @@ def load_batch(records: list[dict], token_manager: TokenManager) -> list[dict]:
             "status":       None,
         }
 
-        # --- 1. Extract fields present in PAYLOAD_FIELDS, skip missing/empty ---
-        record = dict(config.PAYLOAD_FIELDS)  
+        # --- 1. Seed record from HARDCODED (full payload template with defaults) ---
+        record = dict(config.HARDCODED)
+
+        # --- 2. Overwrite with any matching values from incoming JSON ---
         for src, dest in config.PAYLOAD_FIELDS.items():
             value = raw.get(src)
             if value is not None and str(value).strip() != "":
                 record[dest] = value
-
-        # --- 2. Inject hardcoded values (always override) ---
-        #record.update(config.HARDCODED)
 
         # --- 3. Validate mandatory fields ---
         missing = [f for f in config.MANDATORY_FIELDS if not str(record.get(f, "")).strip()]
@@ -116,7 +74,7 @@ def load_batch(records: list[dict], token_manager: TokenManager) -> list[dict]:
             continue
 
         # --- 4. Build payload ---
-        payload              = {"customerV2s": [record]}
+        payload = {"customerV2s": [record]}
         result["payload_sent"] = payload
 
         query_params = {
