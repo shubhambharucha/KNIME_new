@@ -1,66 +1,43 @@
 """
 app/entities/customer/config.py
---------------------------------
-Customer entity configuration.
-
-Two fields are extracted from the incoming JSON:
-  - CustomerCode  →  customerCode
-  - currencyCode  →  currencyCode
-
-Everything else is dropped. The rest of the payload is built from
-DEFAULTS, with a handful of fields derived from customerCode at runtime
-(businessRelationCode, businessRelationName) — that derivation happens
-in the loader, not here.
 """
 
-# The only two fields we care about from the incoming record.
-# Key = incoming JSON field name, Value = canonical name used in payload.
-EXTRACT_FIELDS = {
-    "CustomerCode": "customerCode",
-    "currencyCode": "currencyCode",
+# All fields extracted from incoming JSON mapped to their QAD payload names.
+# Order matches the confirmed-working payload exactly.
+PAYLOAD_FIELDS = {
+    "customerCode":                   "customerCode",
+    "businessRelationCode":           "businessRelationCode",
+    "customerTypeCode":               "customerTypeCode",
+    "creditTermsCode":                "creditTermsCode",
+    "invoiceControlGLProfileCode":    "invoiceControlGLProfileCode",
+    "creditNoteControlGLProfileCode": "creditNoteControlGLProfileCode",
+    "prePaymentControlGLProfileCode": "prePaymentControlGLProfileCode",
+    "salesAccountGLProfileCode":      "salesAccountGLProfileCode",
+    "invoiceStatusCode":              "invoiceStatusCode",
+    "addressSearchName":              "addressSearchName",
+    "city":                           "city",
+    "stateCode":                      "stateCode",
+    "businessRelationName":           "businessRelationName",
+    "addressName":                    "addressName",
+    "currencyCode":                   "currencyCode",
+    "customerCurrencyCode":           "customerCurrencyCode",
+    "languageCode":                   "languageCode",
+    "taxZone":                        "taxZone",
+    "customCombo10":                  "customCombo10",
 }
 
-# Hardcoded values applied to every record after extraction.
-# Copied exactly from the confirmed-working minimal payload.
-DEFAULTS: dict = {
-    # Identity
-    "customerTypeCode": "INTC",
-    "sharedSetCode": "QMI-CUST",
-    "languageCode": "us",
-
-    # AR GL profiles
-    "invoiceControlGLProfileCode": "ARcontrol3rdparty",
-    "creditNoteControlGLProfileCode": "ARcontrol3rdparty",
-    "prePaymentControlGLProfileCode": "ARcontrol3rdparty",
-    "salesAccountGLProfileCode": "FinCharge1",
-
-    # Terms & status
-    "creditTermsCode": "1M",
-    "invoiceStatusCode": "C-OK",
-
-    # Tax
-    "taxZone": "USA-NJ",
-    "vatDeliveryType": "SERVICE",
-
-    # Business Relation — create new inline, no lookup
+# Never sourced from incoming JSON — always injected as-is.
+HARDCODED = {
+    "sharedSetCode":                    "QMI-CUST",
+    "isOverruleAllowedSOCreditLimit":   True,
     "isCreateBusinessRelationRequired": True,
-    "isBusinessRelationActive": True,
-    "isActive": True,
-
-    # Address (hardcoded, same as working payload)
-    "addressName": "default",
-    "addressSearchName": "default",
-    "addressTypeCode": "HEADOFFICE",
-    "city": "Manhattan",
-    "countryCode": "USA",
 }
 
-# Fields that must be present and non-empty before we POST.
+# Must be present and non-empty after assembly or the row is rejected.
 MANDATORY_FIELDS = [
     "customerCode",
-    "currencyCode",
     "businessRelationCode",
-    "businessRelationName",
+    "currencyCode",
     "sharedSetCode",
     "creditTermsCode",
     "invoiceControlGLProfileCode",
