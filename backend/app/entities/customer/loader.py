@@ -105,7 +105,7 @@ def load_batch(records: list[dict], token_manager: TokenManager) -> list[dict]:
                 record[dest] = value
 
         # --- 2. Inject hardcoded values (always override) ---
-        record.update(config.HARDCODED)
+        #record.update(config.HARDCODED)
 
         # --- 3. Validate mandatory fields ---
         missing = [f for f in config.MANDATORY_FIELDS if not str(record.get(f, "")).strip()]
