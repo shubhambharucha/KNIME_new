@@ -3,13 +3,20 @@ app/entities/customer/loader.py
 --------------------------------
 Load Customer records into QAD customerV2s API.
 
+Handles:
+- Integer GL profile IDs → string conversions
+- Empty mandatory fields → apply defaults
+- Address population from businessRelationName
+- Per-row success/error tracking
+
 Flow:
   1. For each flattened record from the batch
-  2. Validate mandatory fields
-  3. Build customerV2s payload
-  4. POST to QAD with query params (sharedSetCode, customerCode, viewUri)
-  5. Capture success (200) or error message
-  6. Return per-row results
+  2. Apply type coercions (IDs → strings)
+  3. Validate mandatory fields
+  4. Build customerV2s payload
+  5. POST to QAD with query params
+  6. Capture success (200) or error message
+  7. Return per-row results
 """
 
 import logging
@@ -17,7 +24,7 @@ import requests
 from typing import Any
 
 from app.config import CONFIG
-from . import config as customer_config
+from . import customer_config as config
 
 logger = logging.getLogger(__name__)
 
@@ -52,40 +59,80 @@ class TokenManager:
         return token
 
 
+def _coerce_types(record: dict) -> dict:
+    """
+    Convert integer GL profile IDs to strings.
+    Ensure all GL codes are strings for API compatibility.
+    """
+    gl_profile_fields = [
+        "invoiceControlGLProfileCode",
+        "creditNoteControlGLProfileCode",
+        "prePaymentControlGLProfileCode",
+        "salesAccountGLProfileCode",
+    ]
+    
+    for field in gl_profile_fields:
+        value = record.get(field)
+        if value is not None:
+            if isinstance(value, int):
+                # Convert integer ID to string
+                record[field] = str(value)
+            elif isinstance(value, str) and value.strip():
+                # Keep non-empty strings as-is
+                pass
+            else:
+                # Remove empty/None values; will be filled by defaults
+                if field in record:
+                    del record[field]
+    
+    return record
+
+
+def _apply_defaults(record: dict) -> dict:
+    """
+    Apply DEFAULTS to record where fields are empty/missing.
+    """
+    for col, default_value in config.DEFAULTS.items():
+        # Only apply if field is missing or empty
+        if col not in record or record[col] is None or (isinstance(record[col], str) and not record[col].strip()):
+            record[col] = default_value
+    
+    return record
+
+
 def _validate_mandatory_fields(record: dict) -> tuple[bool, str]:
     """
     Check that all mandatory fields are present and non-empty.
     Returns (is_valid, error_message)
     """
     missing = []
-    for col in customer_config.MANDATORY_COLUMNS:
+    for col in config.MANDATORY_COLUMNS:
         value = record.get(col)
         if value is None or (isinstance(value, str) and not value.strip()):
             missing.append(col)
 
     if missing:
-        return False, f"Missing mandatory fields: {', '.join(missing)}"
+        return False, f"Missing mandatory: {', '.join(missing)}"
     return True, ""
 
 
 def _build_customer_payload(record: dict) -> dict:
     """
     Build the customerV2s payload (wrapped in { "customerV2s": [...] }).
-    Takes the flattened, aliased record and constructs the API request body.
+    
+    Populates:
+    - addressName and addressSearchName from businessRelationName if not set
+    - Removes None/empty values to keep payload clean
     """
-    # Copy customerCode → businessRelationCode if not explicitly provided
-    if not record.get("businessRelationCode") and record.get("customerCode"):
-        record["businessRelationCode"] = record["customerCode"]
+    # Populate address fields from businessRelationName
+    if not record.get("addressName") and record.get("businessRelationName"):
+        record["addressName"] = record["businessRelationName"]
+    if not record.get("addressSearchName") and record.get("businessRelationName"):
+        record["addressSearchName"] = record["businessRelationName"]
 
-    # Populate addressName and addressSearchName from businessRelationName if not set
-    if not record.get("addressName"):
-        record["addressName"] = record.get("businessRelationName", "")
-    if not record.get("addressSearchName"):
-        record["addressSearchName"] = record.get("businessRelationName", "")
-
+    # Build clean payload (exclude None and empty strings)
     customer_v2 = {}
     for key, value in record.items():
-        # Skip None and empty string values (QAD handles them as omitted)
         if value is None or (isinstance(value, str) and not value.strip()):
             continue
         customer_v2[key] = value
@@ -107,14 +154,14 @@ def load_batch(records: list[dict], token_manager: TokenManager) -> list[dict]:
             {
                 "row": 0,
                 "ok": True,
-                "customerCode": "CUST001",
+                "customerCode": "EXP004",
                 "error": None
             },
             {
                 "row": 1,
                 "ok": False,
-                "customerCode": "CUST002",
-                "error": "Missing mandatory fields: creditTermsCode"
+                "customerCode": "EXP009",
+                "error": "Missing mandatory: invoiceControlGLProfileCode"
             },
             ...
         ]
@@ -123,6 +170,9 @@ def load_batch(records: list[dict], token_manager: TokenManager) -> list[dict]:
     token = token_manager.get()
 
     for row_idx, record in enumerate(records):
+        # Make a copy to avoid mutating original
+        record = dict(record)
+        
         result = {
             "row": row_idx,
             "ok": False,
@@ -130,24 +180,31 @@ def load_batch(records: list[dict], token_manager: TokenManager) -> list[dict]:
             "error": None,
         }
 
-        # Step 1: Validate mandatory fields
-        is_valid, error_msg = _validate_mandatory_fields(record)
-        if not is_valid:
-            result["error"] = error_msg
-            results.append(result)
-            logger.warning(f"Row {row_idx}: {error_msg}")
-            continue
-
-        # Step 2: Build payload
         try:
+            # Step 1: Type coercions (IDs → strings)
+            record = _coerce_types(record)
+
+            # Step 2: Apply defaults
+            record = _apply_defaults(record)
+
+            # Step 3: Validate mandatory fields
+            is_valid, error_msg = _validate_mandatory_fields(record)
+            if not is_valid:
+                result["error"] = error_msg
+                results.append(result)
+                logger.warning(f"Row {row_idx}: {error_msg}")
+                continue
+
+            # Step 4: Build payload
             payload = _build_customer_payload(record)
+
         except Exception as e:
             result["error"] = f"Payload build failed: {str(e)}"
             results.append(result)
             logger.error(f"Row {row_idx}: {result['error']}")
             continue
 
-        # Step 3: Extract query params
+        # Step 5: Extract query params
         customer_code = record.get("customerCode", "")
         shared_set_code = record.get("sharedSetCode", "")
 
@@ -157,7 +214,7 @@ def load_batch(records: list[dict], token_manager: TokenManager) -> list[dict]:
             logger.warning(f"Row {row_idx}: {result['error']}")
             continue
 
-        # Step 4: Prepare request
+        # Step 6: Prepare request
         query_params = {
             "sharedSetCode": shared_set_code,
             "customerCode": customer_code,
@@ -168,7 +225,7 @@ def load_batch(records: list[dict], token_manager: TokenManager) -> list[dict]:
             "Authorization": f"Bearer {token}",
         }
 
-        # Step 5: POST with retry on 401 (token refresh)
+        # Step 7: POST with retry on 401 (token refresh)
         retry = True
         while retry:
             try:

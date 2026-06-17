@@ -3,52 +3,70 @@ app/entities/customer/config.py
 --------------------------------
 Column mapping and defaults for Customer entity.
 
-COLUMN_ALIASES: Input JSON field → QAD API field
-DEFAULTS: Hardcoded values applied to every customer
-MANDATORY_COLUMNS: Required fields for payload validation
+Input JSON comes directly with QAD field names (no cm_ prefix).
+Some GL profile codes come as integer IDs; loader converts them to strings.
 """
 
 # Map input JSON column names to QAD customerV2s API field names
-# NOTE: cm_addr is used for both customerCode and businessRelationCode
-#       The loader will copy customerCode → businessRelationCode if not explicitly provided
+# Most fields use their QAD names directly; ID fields are renamed/mapped
 COLUMN_ALIASES = {
-    "cm_addr": "customerCode",
-    "cm_type": "customerTypeCode",
-    "cm_cr_terms": "creditTermsCode",
-    "cm_fin": "isFinanceCharge",
-    "cm_ar_acct": "invoiceControlGLProfileCode",
-    "cm_rmks": "commentNote",
-    "cm_region": "stateCode",
-    "cm_sort": "businessRelationName",
-    "cm_balance": "openItemBalance",
-    "cm_taxable": "isTaxable",
-    "cm_curr": "currencyCode",
-    "cm_lang": "languageCode",
-    "cm_db": "sharedSetCode",
-    "cm_cr_hold": "isLockedCreditLimit",
-    "cm_high_cr": "highCredit",
-    "cm_high_date": "highCreditDate",
-    "cm_sale_date": "lastSaleDate",
-    "cm_fst_id": "federalTax",
-    "cm_pst_id": "stateTax",
-    "cm_tax_in": "isTaxIncluded",
-    "cm_class": "taxClass",
-    "cm_taxc": "taxZone",
-    "cm_bill": "billToCustomerCode",
+    # Primary key
+    "CustomerCode": "customerCode",
+    
+    # Relation + Classification
+    "businessRelationName": "businessRelationName",
+    "BusinessRelation_ID": "businessRelationCode",  # Use ID as code
+    "customerTypeCode": "customerTypeCode",
+    
+    # Credit & Payment Terms
+    "creditTermsCode": "creditTermsCode",
+    "isLockedCreditLimit": "isLockedCreditLimit",
+    "highCredit": "highCredit",
+    
+    # GL Profiles (come as IDs, will be converted to strings)
+    "InvControlGLProfile_ID": "invoiceControlGLProfileCode",
+    "creditNoteControlGLProfileCode": "creditNoteControlGLProfileCode",
+    "prePaymentControlGLProfileCode": "prePaymentControlGLProfileCode",
+    "salesAccountGLProfileCode": "salesAccountGLProfileCode",
+    
+    # Invoice & Finance
+    "invoiceControlGLProfileCode": "invoiceControlGLProfileCode",
+    "isFinanceCharge": "isFinanceCharge",
+    
+    # Address & Location
+    "commentNote": "commentNote",
+    "stateCode": "stateCode",
+    "taxZone": "taxZone",
+    "billToCustomerCode": "billToCustomerCode",
+    
+    # Tax
+    "isTaxable": "isTaxable",
+    "isTaxIncluded": "isTaxIncluded",
+    "taxClass": "taxClass",
+    "federalTax": "federalTax",
+    "stateTax": "stateTax",
+    
+    # Currency & Language
+    "currencyCode": "currencyCode",
+    "languageCode": "languageCode",
+    
+    # Shared Set
+    "sharedSetCode": "sharedSetCode",
+    
+    # Balance
+    "openItemBalance": "openItemBalance",
+    
+    # Ignored: internal IDs not sent to QAD
+    # Debtor_ID, FinChgGLProfile_ID, Reason_ID
 }
 
-# Hardcoded defaults (always applied, can be overridden by input)
+# Hardcoded defaults (applied if field is empty/missing)
 DEFAULTS = {
-    "creditNoteControlGLProfileCode": "ARcontrol3rdparty",
-    "prePaymentControlGLProfileCode": "ARcontrol3rdparty",
-    "salesAccountGLProfileCode": "Sales",
     "invoiceStatusCode": "OK2PAY",
     "customCombo10": "B2B",
     "isOverruleAllowedSOCreditLimit": True,
     "domainCode": "10USA",
-    # Address fields populated from customerCode/businessRelationName
-    "addressName": None,  # Will be set from businessRelationName
-    "addressSearchName": None,  # Will be set from businessRelationName
+    "sharedSetCode": "QMI-CUST",  # Default shared set if empty
 }
 
 # Mandatory fields for payload validation
