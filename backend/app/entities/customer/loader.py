@@ -57,7 +57,7 @@ def load_batch(records: list[dict], token_manager: TokenManager) -> list[dict]:
         }
 
         # --- 1. Seed record from HARDCODED (full payload template with defaults) ---
-        #record = dict(config.HARDCODED)
+        record = {k: v for k, v in config.PAYLOAD_FIELDS.items()}
 
         # --- 2. Overwrite with any matching values from incoming JSON ---
         for src, dest in config.PAYLOAD_FIELDS.items():
