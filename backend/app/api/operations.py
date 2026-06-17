@@ -1,242 +1,142 @@
 """
 app/api/operations.py
-------------------------
-POST /api/validate  { "batch_ids": [...] }
-POST /api/load       { "batch_ids": [...] }
-
-Same SSE event encoding as before (so frontend parsing loop barely changes),
-but the unit of work is now a row inside a batch, not a row inside an xlsx.
-
-Event types: batch_start, progress, row_result, batch_result, done, error
+---------------------
+POST /api/load     — Load batch(es) into QAD
+GET  /api/status   — Check overall pipeline status
 """
 
-import asyncio
 import logging
-from typing import AsyncGenerator
+from typing import Any
 
-from fastapi import APIRouter
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException, Query
 
 from app.core.batch_store import batch_store
-from app.core.events import sse
-from app.core.registry import ENTITY_MAP, is_implemented
-from app.qad.auth import TokenManager
+from app.core.registry import get_entity, list_entities
+from app.entities.customer.loader import TokenManager
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-SSE_HEADERS = {
-    "Cache-Control": "no-cache, no-transform",
-    "X-Accel-Buffering": "no",
-    "Connection": "keep-alive",
-}
-
-
-class BatchOperationRequest(BaseModel):
-    batch_ids: list[str]
-
-
-async def validate_stream(batch_ids: list[str]) -> AsyncGenerator[str, None]:
-    """
-    Validate a list of batches. For each batch:
-      - Load the batch from store
-      - Look up its entity in ENTITY_MAP
-      - Run validate_row() on each flattened record
-      - Stream per-row results via SSE
-      - Update batch status + results in store
-    """
-    loop = asyncio.get_event_loop()
-
-    for batch_id in batch_ids:
-        batch = batch_store.get(batch_id)
-        if batch is None:
-            msg = f"Batch not found: {batch_id}"
-            logger.error(msg)
-            yield sse({"type": "error", "message": msg})
-            continue
-
-        entity = batch["entity"]
-        if not is_implemented(entity):
-            msg = f"Entity '{entity}' is not yet ported to the new architecture"
-            logger.warning(msg)
-            yield sse({"type": "error", "message": msg})
-            continue
-
-        entry = ENTITY_MAP[entity]
-        validate_row = entry["validate_row"]
-        records = batch["flattened"]
-        total = len(records)
-
-        batch_store.update_status(batch_id, "validating")
-        logger.info(f"Starting validation for batch {batch_id} ({entity}): {total} rows")
-        
-        yield sse({
-            "type": "batch_start",
-            "batch_id": batch_id,
-            "entity": entity,
-            "count": total,
-        })
-        await asyncio.sleep(0)
-
-        passed = 0
-        failed = 0
-        row_results = []
-
-        for i, record in enumerate(records, start=1):
-            try:
-                errors = await loop.run_in_executor(None, validate_row, record)
-                ok = len(errors) == 0
-            except Exception as e:
-                logger.exception(f"Validation error in batch {batch_id} row {i}: {e}")
-                ok = False
-                errors = [str(e)]
-
-            if ok:
-                passed += 1
-            else:
-                failed += 1
-
-            row_results.append({"row": i, "ok": ok, "errors": errors})
-
-            yield sse({
-                "type": "row_result",
-                "batch_id": batch_id,
-                "row": i,
-                "total": total,
-                "ok": ok,
-                "errors": errors,
-            })
-            await asyncio.sleep(0)
-
-        status = "validated" if failed == 0 else "validated_with_errors"
-        batch_store.update_results(
-            batch_id,
-            {"passed": passed, "failed": failed, "rows": row_results},
-            status=status,
-        )
-        logger.info(f"Validation complete for batch {batch_id}: {passed} passed, {failed} failed")
-
-        yield sse({
-            "type": "batch_result",
-            "batch_id": batch_id,
-            "entity": entity,
-            "passed": passed,
-            "failed": failed,
-        })
-        await asyncio.sleep(0)
-
-    yield sse({"type": "done", "message": "Validation complete"})
-
-
-async def load_stream(batch_ids: list[str]) -> AsyncGenerator[str, None]:
-    """
-    Load a list of batches into QAD. For each batch:
-      - Load the batch from store
-      - Look up its entity in ENTITY_MAP
-      - Run load_row() on each flattened record (with shared TokenManager)
-      - Stream per-row results via SSE
-      - Update batch status + results in store
-    """
-    loop = asyncio.get_event_loop()
-    tm = TokenManager()  # shared token across all batches in this load run
-
-    for batch_id in batch_ids:
-        batch = batch_store.get(batch_id)
-        if batch is None:
-            msg = f"Batch not found: {batch_id}"
-            logger.error(msg)
-            yield sse({"type": "error", "message": msg})
-            continue
-
-        entity = batch["entity"]
-        if not is_implemented(entity):
-            msg = f"Entity '{entity}' is not yet ported to the new architecture"
-            logger.warning(msg)
-            yield sse({"type": "error", "message": msg})
-            continue
-
-        entry = ENTITY_MAP[entity]
-        load_row = entry["load_row"]
-        records = batch["flattened"]
-        total = len(records)
-
-        batch_store.update_status(batch_id, "loading")
-        logger.info(f"Starting load for batch {batch_id} ({entity}): {total} rows")
-        
-        yield sse({
-            "type": "batch_start",
-            "batch_id": batch_id,
-            "entity": entity,
-            "count": total,
-        })
-        await asyncio.sleep(0)
-
-        passed = 0
-        failed = 0
-        row_results = []
-
-        for i, record in enumerate(records, start=1):
-            try:
-                ok, error_msg = await loop.run_in_executor(None, load_row, record, tm)
-            except Exception as e:
-                logger.exception(f"Load error in batch {batch_id} row {i}: {e}")
-                ok = False
-                error_msg = str(e)
-
-            if ok:
-                passed += 1
-            else:
-                failed += 1
-
-            row_results.append({"row": i, "ok": ok, "error": error_msg})
-
-            yield sse({
-                "type": "row_result",
-                "batch_id": batch_id,
-                "row": i,
-                "total": total,
-                "ok": ok,
-                "error": error_msg,
-            })
-            await asyncio.sleep(0)
-
-        status = "loaded" if failed == 0 else "loaded_with_errors"
-        batch_store.update_results(
-            batch_id,
-            {"passed": passed, "failed": failed, "rows": row_results},
-            status=status,
-        )
-        logger.info(f"Load complete for batch {batch_id}: {passed} passed, {failed} failed")
-
-        yield sse({
-            "type": "batch_result",
-            "batch_id": batch_id,
-            "entity": entity,
-            "passed": passed,
-            "failed": failed,
-        })
-        await asyncio.sleep(0)
-
-    yield sse({"type": "done", "message": "Load complete"})
-
-
-@router.post("/api/validate")
-async def api_validate(req: BatchOperationRequest):
-    """Stream validation progress for one or more batches."""
-    return StreamingResponse(
-        validate_stream(req.batch_ids),
-        media_type="text/event-stream",
-        headers=SSE_HEADERS,
-    )
+# Global token manager (one per API instance; refreshes on 401)
+_token_manager = TokenManager()
 
 
 @router.post("/api/load")
-async def api_load(req: BatchOperationRequest):
-    """Stream load progress for one or more batches."""
-    return StreamingResponse(
-        load_stream(req.batch_ids),
-        media_type="text/event-stream",
-        headers=SSE_HEADERS,
+async def load_batch(batch_id: str):
+    """
+    Load a single batch into QAD.
+    
+    Flow:
+      1. Fetch batch from store
+      2. Look up entity loader
+      3. Call loader.load_batch(flattened_records, token_manager)
+      4. Store results, update status → loading | loaded | loaded_with_errors
+    
+    Returns: { "ok": bool, "batch_id": str, "status": str, "results": [...] }
+    """
+    # Fetch batch
+    batch = batch_store.get(batch_id)
+    if batch is None:
+        raise HTTPException(status_code=404, detail=f"Batch not found: {batch_id}")
+
+    entity = batch["entity"]
+    flattened = batch["flattened"]
+
+    # Look up entity loader
+    entity_entry = get_entity(entity)
+    if entity_entry is None:
+        raise HTTPException(status_code=400, detail=f"Unknown entity: {entity}")
+
+    loader = entity_entry["loader"]
+
+    # Update status to "loading"
+    batch_store.update_status(batch_id, "loading")
+
+    # Load batch
+    try:
+        results = loader.load_batch(flattened, _token_manager)
+    except Exception as e:
+        logger.error(f"Loader error for batch {batch_id}: {e}")
+        batch_store.update_status(batch_id, "loaded_with_errors", [])
+        raise HTTPException(status_code=500, detail=f"Loader error: {str(e)}")
+
+    # Determine final status
+    ok_count = sum(1 for r in results if r.get("ok"))
+    fail_count = len(results) - ok_count
+
+    if fail_count == 0:
+        final_status = "loaded"
+    else:
+        final_status = "loaded_with_errors"
+
+    # Store results and update status
+    batch_store.update_status(batch_id, final_status, results)
+
+    logger.info(
+        f"Batch {batch_id} ({entity}): {ok_count} OK, {fail_count} FAILED"
     )
+
+    return {
+        "ok": fail_count == 0,
+        "batch_id": batch_id,
+        "entity": entity,
+        "status": final_status,
+        "summary": {
+            "total": len(results),
+            "ok": ok_count,
+            "failed": fail_count,
+        },
+        "results": results,
+    }
+
+
+@router.post("/api/load-all")
+async def load_all(entity: str | None = None):
+    """
+    Load all pending batches (optionally filtered by entity).
+    
+    Returns: { "batches_loaded": int, "results": [...] }
+    """
+    batches = batch_store.list(entity=entity)
+    pending = [b for b in batches if b["status"] == "pending"]
+
+    if not pending:
+        return {"batches_loaded": 0, "results": []}
+
+    results = []
+    for batch in pending:
+        try:
+            load_result = await load_batch(batch["id"])
+            results.append(load_result)
+        except HTTPException as e:
+            results.append({
+                "batch_id": batch["id"],
+                "ok": False,
+                "error": e.detail,
+            })
+
+    return {
+        "batches_loaded": len([r for r in results if r.get("ok")]),
+        "results": results,
+    }
+
+
+@router.get("/api/status")
+async def status():
+    """
+    Return overall pipeline status: count of batches by status.
+    """
+    batches = batch_store.list()
+    entities = list_entities()
+
+    status_counts = {}
+    for batch in batches:
+        s = batch["status"]
+        status_counts[s] = status_counts.get(s, 0) + 1
+
+    return {
+        "entities": entities,
+        "total_batches": len(batches),
+        "by_status": status_counts,
+    }

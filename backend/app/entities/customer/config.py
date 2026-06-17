@@ -1,53 +1,66 @@
 """
 app/entities/customer/config.py
-----------------------------------
-Mandatory columns ported directly from Customer_load.py.
+--------------------------------
+Column mapping and defaults for Customer entity.
 
-COLUMN_ALIASES is the explicit, declared semantic mapping the doc's "flexible
-key matching" idea is replaced with — if KNIME's field names differ from QAD's
-internal names below, list the mapping here. Left empty until you share a real
-KNIME Customer payload; nothing is guessed.
+COLUMN_ALIASES: Input JSON field → QAD API field
+DEFAULTS: Hardcoded values applied to every customer
+MANDATORY_COLUMNS: Required fields for payload validation
 """
 
-MANDATORY_COLUMNS = [
-    "Customer",
-    "Shared Set",
-    "Business Relation",
-    "Active",
-    "Currency",
-    "Credit Terms",
-    "Invoice Status",
-    "Invoice Control GL Profile",
-    "Credit Note Control GL Profile",
-    "Prepayment Control GL Profile",
-    "Sales Account GL Profile",
-]
-
-MANDATORY_DOMAIN_COLUMNS = [
-    "Domain",
-    "Site Code",
-    "Daybook Set",
-]
-
-FIELD_RULES = {
-    "Customer":            {"type": "character", "max_len": 8},
-    "Shared Set":          {"type": "character", "max_len": 20},
-    "Business Relation":   {"type": "character", "max_len": 20},
-    "Active":              {"type": "logical",   "max_len": None},
-    "Currency":            {"type": "character", "max_len": 3},
-    "Credit Terms":        {"type": "character", "max_len": 8},
-    "Invoice Status":      {"type": "character", "max_len": 20},
-    "Invoice Control GL Profile": {"type": "character", "max_len": 20},
-    "Credit Note Control GL Profile": {"type": "character", "max_len": 20},
-    "Prepayment Control GL Profile": {"type": "character", "max_len": 20},
-    "Sales Account GL Profile": {"type": "character", "max_len": 20},
+# Map input JSON column names to QAD customerV2s API field names
+# NOTE: cm_addr is used for both customerCode and businessRelationCode
+#       The loader will copy customerCode → businessRelationCode if not explicitly provided
+COLUMN_ALIASES = {
+    "cm_addr": "customerCode",
+    "cm_type": "customerTypeCode",
+    "cm_cr_terms": "creditTermsCode",
+    "cm_fin": "isFinanceCharge",
+    "cm_ar_acct": "invoiceControlGLProfileCode",
+    "cm_rmks": "commentNote",
+    "cm_region": "stateCode",
+    "cm_sort": "businessRelationName",
+    "cm_balance": "openItemBalance",
+    "cm_taxable": "isTaxable",
+    "cm_curr": "currencyCode",
+    "cm_lang": "languageCode",
+    "cm_db": "sharedSetCode",
+    "cm_cr_hold": "isLockedCreditLimit",
+    "cm_high_cr": "highCredit",
+    "cm_high_date": "highCreditDate",
+    "cm_sale_date": "lastSaleDate",
+    "cm_fst_id": "federalTax",
+    "cm_pst_id": "stateTax",
+    "cm_tax_in": "isTaxIncluded",
+    "cm_class": "taxClass",
+    "cm_taxc": "taxZone",
+    "cm_bill": "billToCustomerCode",
 }
 
-VALID_LOGICAL = {"yes", "no"}
+# Hardcoded defaults (always applied, can be overridden by input)
+DEFAULTS = {
+    "creditNoteControlGLProfileCode": "ARcontrol3rdparty",
+    "prePaymentControlGLProfileCode": "ARcontrol3rdparty",
+    "salesAccountGLProfileCode": "Sales",
+    "invoiceStatusCode": "OK2PAY",
+    "customCombo10": "B2B",
+    "isOverruleAllowedSOCreditLimit": True,
+    "domainCode": "10USA",
+    # Address fields populated from customerCode/businessRelationName
+    "addressName": None,  # Will be set from businessRelationName
+    "addressSearchName": None,  # Will be set from businessRelationName
+}
 
-# KNIME column name -> internal name used by FIELD_RULES / build_payload above.
-# e.g. "CUST_CODE": "Customer"
-COLUMN_ALIASES: dict[str, str] = {}
-
-# Injected into every record before validation/load if missing, e.g. {"Domain Code": "10USA"}
-DEFAULTS: dict[str, str] = {}
+# Mandatory fields for payload validation
+MANDATORY_COLUMNS = [
+    "customerCode",
+    "businessRelationCode",
+    "creditTermsCode",
+    "invoiceControlGLProfileCode",
+    "creditNoteControlGLProfileCode",
+    "prePaymentControlGLProfileCode",
+    "salesAccountGLProfileCode",
+    "invoiceStatusCode",
+    "currencyCode",
+    "sharedSetCode",
+]

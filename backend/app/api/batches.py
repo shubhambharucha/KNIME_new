@@ -32,22 +32,10 @@ router = APIRouter()
 
 def _detect_entity(raw_json: dict) -> str:
     """
-    Try to infer entity from the incoming JSON structure.
-    Returns entity name if found, else "unknown".
+    HARDCODED for testing: always return "Customer".
+    In production, can extend to detect entity from JSON structure.
     """
-    # Rule 1: explicit "entity" field at top level
-    if isinstance(raw_json, dict) and "entity" in raw_json:
-        return raw_json["entity"]
-
-    # Rule 2: look for known entity names in the data structure keys
-    # (for cases where KNIME sends {"Customer": [...]} or similar)
-    if isinstance(raw_json, dict):
-        for entity_name in ENTITY_MAP.keys():
-            if entity_name in raw_json:
-                return entity_name
-
-    # Rule 3: default fallback
-    return "unknown"
+    return "Customer"
 
 
 def _apply_entity_config(records: list[dict], config_module) -> list[dict]:
