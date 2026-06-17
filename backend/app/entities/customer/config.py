@@ -6,6 +6,7 @@ app/entities/customer/config.py
 # Fields marked # hardcoded are always sent as-is; loader will use their value directly.
 PAYLOAD_FIELDS = {
     # ── Fields sourced from incoming JSON ─────────────────────────────────
+    "uri": f"urn:be:com.qad.base.customer.ICustomerV2:{QMI-CUST}.{TANVI01}",
     "isBusinessRelationActive": True,
     "BusinessRelationID": "",
     "changeStatus": "2",  # hardcoded as you requested
