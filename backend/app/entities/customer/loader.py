@@ -24,7 +24,7 @@ import requests
 from typing import Any
 
 from app.config import CONFIG
-from . import customer_config as config
+from . import config
 
 logger = logging.getLogger(__name__)
 
@@ -237,7 +237,7 @@ def load_batch(records: list[dict], token_manager: TokenManager) -> list[dict]:
                     timeout=30,
                 )
 
-                if resp.status_code == 200:
+                if resp.status_code in (200, 201):
                     result["ok"] = True
                     result["error"] = None
                     logger.info(f"Row {row_idx}: ✅ {customer_code}")
