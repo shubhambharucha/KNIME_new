@@ -126,6 +126,8 @@ def build_payload(row: dict) -> dict:
     # Force shared set
     record["sharedSetCode"] = SHARED_SET
 
+    record["isOverruleAllowedSOCreditLimit"] = True
+
     # Build URI
     uri = (
         f"{VIEW_URI}:"
