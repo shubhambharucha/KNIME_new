@@ -19,9 +19,9 @@ import json
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Body
 
-from app.core.batch_store import batch_store
+import app.core.batch_store
 from app.core.normalize import flatten, normalize
 from app.core.registry import ENTITY_MAP
 
@@ -53,18 +53,13 @@ def _apply_entity_config(records: list[dict], config_module) -> list[dict]:
 
 
 @router.post("/api/upload-json")
-async def upload_json(request: Request):
+async def upload_json(raw_json: Any = Body(...)):
     """
     Accept ANY valid JSON. Parse it, normalize it, flatten it, store raw + transformed.
     
     Returns: { "ok": bool, "batch_id": str, "entity": str, "count": int, "status": str }
     """
-    try:
-        raw_json = await request.json()
-    except json.JSONDecodeError as e:
-        logger.error(f"Invalid JSON received: {e}")
-        raise HTTPException(status_code=400, detail="Invalid JSON")
-
+    
     # Detect entity (explicit, inferred, or default)
     entity = _detect_entity(raw_json)
 
@@ -78,7 +73,7 @@ async def upload_json(request: Request):
         flattened = _apply_entity_config(flattened, entry["config"])
 
     # Create batch in store
-    batch = batch_store.create(
+    batch = app.core.batch_store.batch_store.create(
         entity=entity,
         raw=raw_json,  # Store raw exactly as received
         normalized=normalized,
@@ -106,7 +101,7 @@ async def get_batch(batch_id: str):
     Return a single batch, including the raw JSON payload exactly as received.
     This endpoint is critical for debugging upstream systems (e.g., KNIME).
     """
-    batch = batch_store.get(batch_id)
+    batch = app.core.batch_store.batch_store.get(batch_id)
     if batch is None:
         raise HTTPException(status_code=404, detail=f"Batch not found: {batch_id}")
     return batch
@@ -118,7 +113,7 @@ async def list_batches(entity: str | None = None):
     List all batches, optionally filtered by entity.
     Returns: { "batches": [...] }
     """
-    batches = batch_store.list(entity=entity)
+    batches = app.core.batch_store.batch_store.list(entity=entity)
     return {"batches": batches}
 
 
@@ -128,7 +123,7 @@ async def debug_last():
     Return the most recently uploaded batch (for quick debugging).
     Useful for checking what just came in from KNIME.
     """
-    batches = batch_store.list()
+    batches = app.core.batch_store.batch_store.list()
     if not batches:
         raise HTTPException(status_code=404, detail="No batches yet")
     return batches[0]  # list() returns DESC by created_at
