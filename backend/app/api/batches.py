@@ -1,18 +1,10 @@
 """
 app/api/batches.py
 ---------------------
-POST /api/upload-json   — KNIME posts ANY valid JSON; becomes a batch, status=pending
-GET  /api/batch/{id}    — raw JSON inspection endpoint (exact as received)
-GET  /api/batches       — list batches, optionally filtered by entity
-GET  /api/debug/last    — return most recently uploaded batch
-
-DESIGN: Accepts ANY valid JSON (no Pydantic schema enforcement).
-  - If JSON has top-level "entity" field → use it
-  - Else if entity name detected in data structure → use it
-  - Else → default to "unknown"
-
-Stores raw JSON exactly as received (never mutated).
-Logs all incoming payloads for audit trail.
+POST /api/upload-json   — Receive JSON, store batch, auto-load to QAD
+GET  /api/batch/{id}    — Inspect batch
+GET  /api/batches       — List batches
+GET  /api/debug/last    — Most recent batch
 """
 
 import json
@@ -22,108 +14,210 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Body
 
 import app.core.batch_store
-from app.core.normalize import flatten, normalize
 from app.core.registry import ENTITY_MAP
+
+from app.core.normalize import flatten, normalize
+
+from app.entities.customer.loader import (
+    TokenManager,
+    load_batch,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# One token manager per API instance
+_token_manager = TokenManager()
+
 
 def _detect_entity(raw_json: dict) -> str:
     """
-    HARDCODED for testing: always return "Customer".
-    In production, can extend to detect entity from JSON structure.
+    Currently hardcoded.
+    Can be expanded later.
     """
     return "Customer"
 
 
 def _apply_entity_config(records: list[dict], config_module) -> list[dict]:
-    """Apply COLUMN_ALIASES + DEFAULTS to every flattened record."""
     aliases = getattr(config_module, "COLUMN_ALIASES", {})
     defaults = getattr(config_module, "DEFAULTS", {})
 
     out = []
+
     for record in records:
         renamed = {aliases.get(k, k): v for k, v in record.items()}
+
         for col, value in defaults.items():
             renamed.setdefault(col, value)
+
         out.append(renamed)
+
     return out
 
 
 @router.post("/api/upload-json")
 async def upload_json(raw_json: Any = Body(...)):
     """
-    Accept ANY valid JSON. Parse it, normalize it, flatten it, store raw + transformed.
-    
-    Returns: { "ok": bool, "batch_id": str, "entity": str, "count": int, "status": str }
+    Receive JSON
+        ↓
+    Normalize
+        ↓
+    Flatten
+        ↓
+    Store Batch
+        ↓
+    Auto Load
+        ↓
+    Return Results
     """
-    
-    # Detect entity (explicit, inferred, or default)
+
+    # ---------------------------------------------------------
+    # Detect entity
+    # ---------------------------------------------------------
+
     entity = _detect_entity(raw_json)
 
-    # Structural transforms: normalize to list[dict], flatten nesting
+    # ---------------------------------------------------------
+    # Normalize + Flatten
+    # ---------------------------------------------------------
+
     normalized = normalize(raw_json)
     flattened = [flatten(r) for r in normalized]
 
-    # Apply semantic field mapping if entity is registered
-    entry = ENTITY_MAP.get(entity)
-    if entry is not None:
-        flattened = _apply_entity_config(flattened, entry["config"])
+    # ---------------------------------------------------------
+    # Entity config (if any)
+    # ---------------------------------------------------------
 
-    # Create batch in store
+    entry = ENTITY_MAP.get(entity)
+
+    if entry is not None:
+        flattened = _apply_entity_config(
+            flattened,
+            entry["config"]
+        )
+
+    # ---------------------------------------------------------
+    # Store batch
+    # ---------------------------------------------------------
+
     batch = app.core.batch_store.batch_store.create(
         entity=entity,
-        raw=raw_json,  # Store raw exactly as received
+        raw=raw_json,
         normalized=normalized,
-        flattened=flattened
+        flattened=flattened,
     )
 
-    # Log the ingestion
     logger.info(
-        f"Received batch {batch['id']}: entity={entity}, count={len(flattened)}, "
-        f"payload_size={len(json.dumps(raw_json))} bytes"
+        f"Received batch {batch['id']} | "
+        f"entity={entity} | "
+        f"records={len(flattened)}"
     )
 
-    return {
-        "ok": True,
-        "batch_id": batch["id"],
-        "entity": batch["entity"],
-        "count": batch["count"],
-        "status": batch["status"],
-    }
+    # ---------------------------------------------------------
+    # AUTO LOAD
+    # ---------------------------------------------------------
+
+    try:
+
+        results = load_batch(
+            flattened,
+            _token_manager,
+        )
+
+        ok_count = sum(
+            1 for r in results
+            if r.get("ok")
+        )
+
+        fail_count = len(results) - ok_count
+
+        status = (
+            "loaded"
+            if fail_count == 0
+            else "loaded_with_errors"
+        )
+
+        app.core.batch_store.batch_store.update_status(
+            batch["id"],
+            status,
+            results,
+        )
+
+        logger.info(
+            f"Batch {batch['id']} completed | "
+            f"OK={ok_count} FAILED={fail_count}"
+        )
+
+        return {
+            "ok": fail_count == 0,
+            "batch_id": batch["id"],
+            "entity": entity,
+            "status": status,
+            "summary": {
+                "total": len(results),
+                "ok": ok_count,
+                "failed": fail_count,
+            },
+            "results": results,
+        }
+
+    except Exception as exc:
+
+        logger.exception(
+            f"Auto-load failed for batch {batch['id']}"
+        )
+
+        app.core.batch_store.batch_store.update_status(
+            batch["id"],
+            "loaded_with_errors",
+            [{
+                "ok": False,
+                "error": str(exc)
+            }],
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Auto-load failed: {str(exc)}"
+        )
 
 
 @router.get("/api/batch/{batch_id}")
 async def get_batch(batch_id: str):
-    """
-    Return a single batch, including the raw JSON payload exactly as received.
-    This endpoint is critical for debugging upstream systems (e.g., KNIME).
-    """
+
     batch = app.core.batch_store.batch_store.get(batch_id)
+
     if batch is None:
-        raise HTTPException(status_code=404, detail=f"Batch not found: {batch_id}")
+        raise HTTPException(
+            status_code=404,
+            detail=f"Batch not found: {batch_id}"
+        )
+
     return batch
 
 
 @router.get("/api/batches")
 async def list_batches(entity: str | None = None):
-    """
-    List all batches, optionally filtered by entity.
-    Returns: { "batches": [...] }
-    """
-    batches = app.core.batch_store.batch_store.list(entity=entity)
-    return {"batches": batches}
+
+    batches = app.core.batch_store.batch_store.list(
+        entity=entity
+    )
+
+    return {
+        "batches": batches
+    }
 
 
 @router.get("/api/debug/last")
 async def debug_last():
-    """
-    Return the most recently uploaded batch (for quick debugging).
-    Useful for checking what just came in from KNIME.
-    """
+
     batches = app.core.batch_store.batch_store.list()
+
     if not batches:
-        raise HTTPException(status_code=404, detail="No batches yet")
-    return batches[0]  # list() returns DESC by created_at
+        raise HTTPException(
+            status_code=404,
+            detail="No batches yet"
+        )
+
+    return batches[0]
